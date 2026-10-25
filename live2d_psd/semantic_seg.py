@@ -19,7 +19,7 @@ from __future__ import annotations
 import numpy as np
 from scipy import ndimage as ndi
 
-from . import models, partseg
+from . import instances, models, partseg
 from .semantic import (
     Scene, SemPart, _Reg, _convex, _depth, _eye_parts, _ink_to_front, _orient_pose, _seg_dist, _Sam,
 )
@@ -135,6 +135,7 @@ def _crowded(logits, H, W) -> bool:
 
 
 _SMALL = {C[n] for n in ("face", "eyes", "eyewear", "ears", "earwear", "nose", "mouth")}
+_NO_SPREAD = {C[n] for n in ("objects", "tail", "wings")}
 
 
 def _self_train(cls, lab, fg, conf):
@@ -147,15 +148,17 @@ def _self_train(cls, lab, fg, conf):
     if not todo.any() or not (cls >= 0).any():
         return cls
     yy, xx = np.mgrid[0:H, 0:W]
-    pos_w = 70.0  # crossing the whole picture costs as much as a large colour change
+    pos_w = 140.0  # being far away counts more than a colour difference
     feats = np.dstack([lab[..., 0], lab[..., 1] * 1.3, lab[..., 2] * 1.3, xx / W * pos_w, yy / H * pos_w]).astype(np.float32)
     centers, owners = [], []
     sure = (cls >= 0) & (conf > 1.0)
     for c in np.unique(cls[sure]):
         if c in _SMALL and c != C["face"]:  # eyes, mouths, ... are only where the model put them
             continue
+        if c in _NO_SPREAD:  # held objects, tails, wings: only what the model saw
+            continue
         px = feats[sure & (cls == c)]
-        if len(px) < 30:
+        if len(px) < max(30, 0.003 * fg.sum()):  # too little evidence to spread
             continue
         px = px[:: max(1, len(px) // 4000)]
         k = int(min(6, max(1, len(px) // 150)))
@@ -199,6 +202,25 @@ def _instances(sc, cls, log):
     from skimage.filters import sobel
     from skimage.graph import MCP_Geometric
 
+    # the character detector (one mask per character) decides who owns what
+    # wherever it is sure; growing along the drawing settles the rest
+    seeds = [f.copy() for f in faces]
+    if instances.available():
+        dets = instances.detect(sc.rgb, log=log)
+        if len(dets) >= 2:
+            prob = np.zeros((len(faces),) + fg.shape, np.float32)
+            for d in dets:
+                ov = [(f & d["mask"]).sum() / max(1, f.sum()) for f in faces]
+                k = int(np.argmax(ov))
+                if ov[k] > 0.3:
+                    np.maximum(prob[k], d["prob"], out=prob[k])
+            best = prob.argmax(0)
+            top = prob.max(0)
+            second = np.sort(prob, 0)[-2] if len(faces) > 1 else np.zeros_like(top)
+            sure = fg & (top > 0.6) & (second < 0.4)
+            for k in range(len(faces)):
+                seeds[k] |= sure & (best == k)
+
     # crossing a drawn line or a colour edge is what separates characters, not
     # distance: a long sleeve still belongs to the body it is drawn onto
     edge = np.max([sobel(ndi.gaussian_filter(sc.lab[..., i], 1.0)) * w for i, w in ((0, 1.0), (1, 1.5), (2, 1.5))], 0)
@@ -206,12 +228,18 @@ def _instances(sc, cls, log):
     cost = 0.05 + 10.0 * edge ** 1.5
     cost[~fg] = 1e6  # don't travel through the background
     dists = []
-    for f in faces:
+    for f, sd in zip(faces, seeds):
         mcp = MCP_Geometric(cost)
-        starts = list(zip(*np.nonzero(f)))[:: max(1, int(f.sum() // 400))]
+        starts = list(zip(*np.nonzero(sd)))[:: max(1, int(sd.sum() // 3000))]
         d, _ = mcp.find_costs(starts)
         # a bigger face means a bigger body: reach scales with the face size
         dists.append(d / f.sum() ** 0.25)
+    for k, sd in enumerate(seeds):
+        others = np.zeros_like(fg)
+        for j, o in enumerate(seeds):
+            if j != k:
+                others |= o
+        dists[k][sd & ~others] = -1.0  # detector-owned pixels stay put
     owner = np.argmin(np.stack(dists), 0)
     out = []
     for k, f in enumerate(faces):
@@ -328,32 +356,114 @@ def _character(sc, cls, inst, prefix, dz, reg, P, O, sam, log):
         P[hw & (xx < body_cx)] = pid("Hand R", ["Body", "Arm R"], "Hand")
         P[hw & (xx >= body_cx)] = pid("Hand L", ["Body", "Arm L"], "Hand")
     P[c("bottomwear")] = pid("Lower Body", ["Body"], "Lower Body")
-    legs = c("legwear") | c("footwear")
+
+    def solid(m):  # stray specks of a limb class are not limbs
+        lb, n = ndi.label(m)
+        if not n:
+            return m
+        sizes = np.bincount(lb.ravel(), minlength=n + 1)
+        ok = sizes >= 0.004 * M.sum()
+        ok[0] = False
+        return ok[lb]
+
+    legs = solid(c("legwear")) | solid(c("footwear"))
     if legs.any():
-        lx = np.nonzero(legs)[1]
-        if pose and min(pose["hip_l"][2], pose["hip_r"][2]) > 0.2:
-            mid = (pose["hip_l"][0] + pose["hip_r"][0]) / 2
-        else:
-            mid = float(np.median(lx))
+        side_r = _leg_sides(pose, legs, xx, yy)
         for name, key in (("legwear", "Leg"), ("footwear", "Foot")):
-            m = c(name)
-            P[m & (xx < mid)] = pid(f"{key} R", ["Body", "Leg R"], key)
-            P[m & (xx >= mid)] = pid(f"{key} L", ["Body", "Leg L"], key)
-    P[c("tail")] = pid("Tail", ["Body"], "Tail")
-    w = c("wings")
+            m = solid(c(name))
+            P[m & side_r] = pid(f"{key} R", ["Body", "Leg R"], key)
+            P[m & ~side_r] = pid(f"{key} L", ["Body", "Leg L"], key)
+    P[solid(c("tail"))] = pid("Tail", ["Body"], "Tail")
+    w = solid(c("wings"))
     P[w & (xx < body_cx)] = pid("Wing R", ["Body"], "Wing")
     P[w & (xx >= body_cx)] = pid("Wing L", ["Body"], "Wing")
     obj = c("objects")
+    k = 0
     if obj.any():
         lb, n = ndi.label(ndi.binary_dilation(obj, iterations=2))
         sizes = np.bincount(lb.ravel())[1:]
-        k = 0
         for i in np.argsort(-sizes):
             comp = (lb == i + 1) & obj
             if comp.sum() < 0.002 * M.sum():
                 continue
             k += 1
             P[comp] = pid(f"Prop {k}", ["Props"], "Prop")
+    # long thin things the part model has no class for: staffs, spears, swords
+    for m in _long_objects(sc, cls, M, sam, log):
+        k += 1
+        P[m] = pid(f"Prop {k}", ["Props"], "Prop")
+
+
+def _long_objects(sc, cls, M, sam, log):
+    """MobileSAM objects in this character that are long, straight and thin
+    (relative to the character), and are neither hair nor skin."""
+    from .semantic import _same_object
+
+    if sam is None or getattr(sam, "sam", None) is None or not M.any():
+        return []
+    H, W = M.shape
+    ys, xs = np.nonzero(M)
+    x0, y0, x1, y1 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
+    size = max(x1 - x0, y1 - y0)
+    crop = sc.rgb[y0:y1, x0:x1].copy()
+    crop[~M[y0:y1, x0:x1]] = 255
+    hairish = (cls == C["hair"]) | (cls == C["face"]) | (cls == C["neck"])
+    found = []
+    try:
+        cands = sam.sam.everything(crop, M[y0:y1, x0:x1], grid=20)
+    except Exception as e:
+        log(f"  object search skipped ({e})")
+        return []
+    for m, _ in cands:
+        full = np.zeros((H, W), bool)
+        full[y0:y1, x0:x1] = m
+        a = full.sum()
+        if a < 0.002 * M.sum() or a > 0.2 * M.sum() or (full & hairish).sum() > 0.3 * a:
+            continue
+        py, px = np.nonzero(full)
+        pts = np.stack([px, py], 1).astype(np.float32)
+        ev = np.linalg.eigvalsh(np.cov(pts.T))
+        length, width = 4 * np.sqrt(max(ev[1], 0)), 4 * np.sqrt(max(ev[0], 1e-3))
+        if length > 0.3 * size and length > 12 * width:
+            found.append(full)
+    groups = []  # pieces of one object split by a hand (above and below the fist)
+    for m in found:
+        for g in groups:
+            if (g[0] & m).sum() > 0.5 * min(g[0].sum(), m.sum()) or _same_object(sc.lab, g[0], m):
+                g.append(m)
+                break
+        else:
+            groups.append([m])
+    return [np.logical_or.reduce(g) & M for g in groups]
+
+
+def _leg_sides(pose, legs, xx, yy):
+    """True where a leg pixel belongs to the character's right leg: nearest
+    leg bone (hip-knee-ankle) when the keypoints are there, else the two
+    biggest pieces, else left/right of the middle."""
+    H, W = legs.shape
+
+    def ok(k):
+        return pose and k in pose and pose[k][2] > 0.3 and -0.2 * W < pose[k][0] < 1.2 * W and -0.2 * H < pose[k][1] < 1.2 * H
+
+    if all(ok(f"{j}_{s}") for j in ("hip", "knee") for s in "lr"):
+        d = {}
+        for s in "lr":
+            pts = [np.array(pose[f"{j}_{s}"][:2]) for j in ("hip", "knee", "ankle") if ok(f"{j}_{s}")]
+            d[s] = np.min([_seg_dist(xx, yy, a, b) for a, b in zip(pts[:-1], pts[1:])], 0)
+        return d["r"] < d["l"]
+    lb, n = ndi.label(legs)
+    if n >= 2:
+        sizes = np.bincount(lb.ravel())[1:]
+        a, b = np.argsort(-sizes)[:2] + 1
+        if sizes[b - 1] > 0.25 * sizes[a - 1]:
+            ca, cb = np.nonzero(lb == a)[1].mean(), np.nonzero(lb == b)[1].mean()
+            right = a if ca < cb else b  # the character's right is on the picture's left
+            _, idx = ndi.distance_transform_edt(~np.isin(lb, [a, b]), return_indices=True)
+            near = lb[idx[0], idx[1]]
+            return near == right
+    lx = np.nonzero(legs)[1]
+    return xx < float(np.median(lx))
 
 
 def _real_hair(hair, lab, fy0, fy1, fx0, fx1, yy):
@@ -416,16 +526,19 @@ def _limbs(pose, upper, handwear, P, pid, xx, yy, W, H) -> bool:
         dists.append(_seg_dist(xx, yy, A, B) / r)
     D = np.stack(dists + [d_torso], 0)
     nearest = D.argmin(0)
-    P[upper & (nearest == len(names))] = pid("Upper Body", ["Body"], "Upper Body")
-    for i, (name, s) in enumerate(names):
-        m = upper & (nearest == i)
-        if name != "Hand":
-            m &= ~handwear
-        P[m] = pid(f"{name} {s}", ["Body", f"Arm {s}"], name)
-    # gloves / hands always go to the closest hand
+    # gloves / hands go to the closest hand, but only around a hand: "hand"
+    # pixels far from every wrist (bare skin, sleeves) follow the bones
     hands = [(i, n) for i, n in enumerate(names) if n[0] == "Hand"]
+    glove = np.zeros_like(handwear)
     if hands:
-        hd = np.stack([D[i] for i, _ in hands], 0).argmin(0)
+        HD = np.stack([D[i] for i, _ in hands], 0)
+        glove = handwear & (HD.min(0) < 3.0)
+    rest = upper & ~glove
+    P[rest & (nearest == len(names))] = pid("Upper Body", ["Body"], "Upper Body")
+    for i, (name, s) in enumerate(names):
+        P[rest & (nearest == i)] = pid(f"{name} {s}", ["Body", f"Arm {s}"], name)
+    if hands:
+        hd = HD.argmin(0)
         for j, (i, (name, s)) in enumerate(hands):
-            P[handwear & (hd == j)] = pid(f"Hand {s}", ["Body", f"Arm {s}"], "Hand")
+            P[glove & (hd == j)] = pid(f"Hand {s}", ["Body", f"Arm {s}"], "Hand")
     return True

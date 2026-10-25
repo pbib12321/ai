@@ -99,7 +99,7 @@ def predict_tiled(rgb: np.ndarray, base: np.ndarray | None = None, log=print) ->
     # must survive); views are trusted less towards their cut edges
     out = base - 1.0
     ramp = np.minimum(np.arange(S), np.arange(S)[::-1]).astype(np.float32)
-    pen = 4.0 * (1.0 - np.clip(ramp / (0.12 * S), 0.0, 1.0))
+    pen = 10.0 * (1.0 - np.clip(ramp / (0.25 * S), 0.0, 1.0)) ** 2
     for st in starts:
         crop = rgb[:, st:st + S] if W >= H else rgb[st:st + S]
         lg = predict(np.ascontiguousarray(crop), log)

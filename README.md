@@ -151,15 +151,22 @@ rules.
 | MediaPipe pose landmarker | body keypoints | Apache-2.0 | storage.googleapis.com |
 | lbpcascade_animeface | anime faces | MIT | github.com/nagadomi |
 | MobileSAM | AI select, object masks | Apache-2.0 | `models/` in this repo, made by `tools/export_mobilesam.py` |
+| CartoonSegmentation character detector (RTMDet-Ins-L) | one mask per character, to split group pictures | weights MIT | graph in `models/` (made by `tools/export_animeins.py`), weights from huggingface.co/dreMaz/AnimeInstanceSegmentation (230 MB; `LIVE2D_PSD_INSTANCES=0` to turn off) |
 | See-through body-part parser (SAM-HQ ViT-H, 19 classes) | the main anime part segmentation, several characters per picture | Apache-2.0 | huggingface.co/24yearsold/l2d_sam_iter2 (1.3 GB; `LIVE2D_PSD_PARTSEG=0` to turn off) |
 | MI-GAN | AI inpainting of hidden areas and of the background behind the character | see MI-GAN `LICENSE-WEIGHTS` | huggingface.co/andraniksargsyan/migan (`LIVE2D_PSD_AI_INPAINT=0` to turn off) |
 
 ## Pictures with several characters
 
-The body-part model finds every face. The picture is split into one region per
-character, grown along the drawn edges, and each character gets its own
-`Character N/` folder in the PSD and its own independent rig in the preview
-(bigger face = closer). They blink and look around on their own timing.
+Wide or crowded pictures are also looked at in overlapping crops, so smaller
+faces are found too. Each face that has eyes starts one character:
+
+- CartoonSegmentation's character detector, trained on anime and cartoon
+  characters, decides which character owns each pixel wherever it is sure;
+- the rest is grown along the drawn lines from there.
+
+Each character gets its own `Character N/` folder in the PSD and its own
+independent rig in the preview (bigger face = closer). They blink and look
+around on their own timing.
 
 ## Your own test pictures
 
@@ -202,8 +209,11 @@ pictures there and rerun it after changing anything.
   the editor, fix it with AI select or the brush, and run again. The fixed
   parts are reused.
 - The best open-source layer decomposer, See-through (SIGGRAPH 2026), needs
-  an NVIDIA GPU with 12–16 GB of memory. It isn't used here because it
-  doesn't run on a Mac.
+  an NVIDIA GPU with 12–16 GB of memory. Its full layer generator doesn't run
+  on a Mac, so only its body-part parser is used here.
+- The body-part model is trained on anime. On realistic or western-comic
+  styles (muscular heroes, armour) it sometimes calls armour or suits "hair"
+  and misses props it has no class for.
 - Keypoints for poses the body detector doesn't understand (lying down, heavy
   foreshortening) can put arms and legs in the wrong place. AI select in the
   editor is the quick fix.
