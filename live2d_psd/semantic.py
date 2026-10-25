@@ -67,15 +67,20 @@ def load_scene(path: str, log=print, matte: str = "auto") -> Scene:
             log("  ISNet unavailable, using flood fill from the border")
             a = load_rgba(path)[..., 3].astype(np.float32) / 255
         else:
-            a = _clean_matte(m)
+            a = _clean_matte(m, rgb)
     fg = a > 0.5
     sc = Scene(rgb=rgb, alpha=a, fg=fg, had_background=had_bg)
     sc.lab = rgb2lab(rgb.astype(np.float32) / 255)
     return sc
 
 
-def _clean_matte(m: np.ndarray) -> np.ndarray:
+def _clean_matte(m: np.ndarray, rgb: np.ndarray | None = None) -> np.ndarray:
     hard = m > 0.5
+    if rgb is not None:
+        # dark outline pixels right next to the character belong to it (the
+        # matte sometimes drops a stretch of outline, opening up enclosed patches)
+        lum = rgb.astype(np.float32) @ np.array([0.299, 0.587, 0.114], np.float32)
+        hard |= (lum < 70) & ndi.binary_dilation(hard, iterations=6)
     lab, n = ndi.label(hard)
     if n == 0:
         return m
@@ -83,6 +88,16 @@ def _clean_matte(m: np.ndarray) -> np.ndarray:
     keep = np.zeros(n + 1, bool)
     keep[1:] = sizes >= 0.02 * sizes.max()
     hard = keep[lab]
+    # small enclosed holes are part of the character (a patch of fur the
+    # same colour as the backdrop); big ones may be real gaps, handled later
+    holes = ndi.binary_fill_holes(hard) & ~hard
+    hl, hn = ndi.label(holes)
+    if hn:
+        hs = np.bincount(hl.ravel())[1:]
+        small = np.zeros(hn + 1, bool)
+        small[1:] = hs < 0.10 * hard.sum()
+        hard |= small[hl]
+        m = np.where(small[hl], 1.0, m)
     hard = ndi.binary_fill_holes(hard) & (m > 0.15) | hard
     # keep the soft edge only around the kept pieces
     near = ndi.binary_dilation(hard, iterations=3)
@@ -263,7 +278,10 @@ def parse(sc: Scene, log=print) -> list[SemPart]:
     hair = np.zeros((H, W), bool)
     face_skin = np.zeros((H, W), bool)
     skin_like = np.zeros((H, W), bool)
-    if sc.face is not None:
+    creature = False
+    if sc.face is None and sc.pose is None:
+        creature = _creature(sc, atoms, sam, reg, P, O, log)
+    if sc.face is not None and not creature:
         fx, fy, fw, fh = sc.face
         fcx = fx + fw / 2
         head_box = (max(0, fx - 0.9 * fw), max(0, fy - 0.9 * fh), min(W, fx + 1.9 * fw), min(H, fy + 1.6 * fh))
@@ -509,7 +527,7 @@ def parse(sc: Scene, log=print) -> list[SemPart]:
                 far[comp] = False
         if far.any():
             P[far] = reg.id("Prop", ["Props"], Z["Prop"])  # renamed per object below
-    else:
+    elif not creature:
         rest = fg & (P == 0) & (O == 0)
         if sc.face is not None:
             fx, fy, fw, fh = sc.face
@@ -614,6 +632,165 @@ def _iris_eyes(sam, head_box, sc, face_full, face_skin, box, skin_ref):
     return out
 
 
+def _creature(sc, atoms, sam, reg, P, O, log) -> bool:
+    """Animals and mascots: find the eyes, get the head from SAM, then ears,
+    mouth, brows, body and tail by shape.  Returns False when no eye pair is found."""
+    H, W = sc.fg.shape
+    fg = sc.fg
+    lab = sc.lab
+    L = lab[..., 0]
+    yy, xx = np.mgrid[0:H, 0:W]
+    ys, xs = np.nonzero(fg)
+    bw, bh, area_fg = np.ptp(xs) + 1, np.ptp(ys) + 1, fg.sum()
+    r = max(1, int(round(atoms.hw * 1.5)))
+    solid = atoms.blob | ndi.binary_opening(fg & (L < 42), structure=np.ones((2 * r + 1, 2 * r + 1)))
+    solid = ndi.binary_fill_holes(solid | (ndi.binary_fill_holes(solid) & (L > 80)))  # highlights inside pupils
+    lb, n = ndi.label(solid)
+    cands = []
+    for i, sl in enumerate(ndi.find_objects(lb), start=1):
+        if sl is None:
+            continue
+        m = lb[sl] == i
+        a = m.sum()
+        h_, w_ = m.shape
+        if not (0.0008 * area_fg < a < 0.04 * area_fg):
+            continue
+        if a / (h_ * w_) < 0.5 or max(h_, w_) / min(h_, w_) > 1.8:
+            continue
+        cy, cx = sl[0].start + h_ / 2, sl[1].start + w_ / 2
+        if cy > ys.min() + 0.75 * bh:
+            continue
+        cands.append((a, cx, cy, i))
+    best, score = None, -1
+    for i in range(len(cands)):
+        for j in range(i + 1, len(cands)):
+            a, b = cands[i], cands[j]
+            dx, dy = abs(a[1] - b[1]), abs(a[2] - b[2])
+            if max(a[0], b[0]) > 2.2 * min(a[0], b[0]) or dy > 0.15 * bh or not (0.08 * bw < dx < 0.6 * bw):
+                continue
+            sc_ = min(a[0], b[0]) / (1 + 3 * dy / bh) * (1.5 - (a[2] + b[2]) / 2 / H)
+            if sc_ > score:
+                best, score = (a, b), sc_
+    if best is None:
+        log("  no eyes found: the whole character is one body layer")
+        return False
+    e1, e2 = sorted(best, key=lambda c: c[1])
+    d = float(np.hypot(e2[1] - e1[1], e2[2] - e1[2]))
+    mid = np.array([(e1[1] + e2[1]) / 2, (e1[2] + e2[2]) / 2])
+    sc.face = (mid[0] - 1.1 * d, mid[1] - 0.9 * d, 2.2 * d, 2.0 * d)
+    log("  creature mode: found a pair of eyes")
+
+    eye_masks = []
+    for e in (e1, e2):
+        base = ndi.binary_dilation(lb == e[3], iterations=max(1, int(atoms.hw)))
+        m = None
+        if sam.sam is not None:
+            for pref in ("small", "mid"):
+                q = sam.mask("full", (0, 0, W, H), [(e[1], e[2])], prefer=pref)
+                if q is not None and 0.6 * base.sum() < q.sum() < 4 * base.sum():
+                    m = q | base
+                    break
+        eye_masks.append(m if m is not None else base)
+
+    # head: SAM clicked on both eyes and the nose, told the body below is not it
+    # chibi animals: the eyes sit about mid-head and the chin is ~0.65 eye-distances below them
+    chin = mid[1] + 0.65 * d
+    prior = fg & (yy < chin) & (np.abs(xx - mid[0]) < 1.45 * d)
+    pl, pn = ndi.label(prior)
+    if pn:
+        keep = np.unique(pl[int(mid[1]), max(0, int(e1[1])) : int(e2[1]) + 1])
+        prior = np.isin(pl, keep[keep > 0])
+    head = None
+    if sam.sam is not None:
+        pos = [(e1[1], e1[2]), (e2[1], e2[2]), (mid[0], mid[1] + 0.45 * d)]
+        below = (mid[0], min(ys.max() - 0.08 * bh, mid[1] + 2.2 * d))
+        neg = [below] if below[1] > mid[1] + 1.4 * d and fg[int(below[1]), int(below[0])] else []
+        best_iou = 0.6
+        for pref in ("small", "mid", "large"):
+            q = sam.mask("full", (0, 0, W, H), pos, neg, prefer=pref)
+            if q is None or not all(q[int(e[2]), int(e[1])] for e in (e1, e2)):
+                continue
+            # the head is the mask that best matches a head-sized oval around the eyes
+            iou = (q & prior).sum() / max(1, (q | prior).sum())
+            if iou > best_iou:
+                head, best_iou = q, iou
+    if head is None:
+        head = prior
+    head = ndi.binary_fill_holes(head) & fg
+    # whiskers and strokes poking out of the head go with it
+    near = ndi.binary_dilation(head, iterations=max(2, int(0.35 * d))) & fg & ~head & (L < 50) & (yy < mid[1] + 1.2 * d)
+    head |= near & ~ndi.binary_dilation(fg & ~head & (L >= 50), iterations=1)
+
+    # ears: what sticks out of the round skull above the eyes
+    k = max(3, int(0.3 * d))
+    disk = (np.add.outer(np.arange(-k, k + 1) ** 2, np.arange(-k, k + 1) ** 2) <= k * k)
+    skull = ndi.binary_opening(head, structure=disk)
+    ears = head & ~skull & (yy < mid[1] - 0.45 * d)
+    ears = ndi.binary_opening(ears, iterations=2)
+    ear_list = []
+    for half in (xx < mid[0], xx >= mid[0]):  # one ear per side even if they touch
+        el, en = ndi.label(ears & half)
+        if en:
+            sizes = np.bincount(el.ravel())[1:]
+            m = el == sizes.argmax() + 1
+            if m.sum() > 0.003 * area_fg:
+                ear_list.append(m)
+    for i, m in enumerate(ear_list[:2]):
+        side = ("R" if i == 0 else "L") if len(ear_list) >= 2 else ("R" if np.nonzero(m)[1].mean() < mid[0] else "L")
+        P[m] = reg.id(f"Ear {side}", ["Head"], Z["Ear"])
+
+    # facial features: not fur-coloured, inside the head
+    eyes_all = eye_masks[0] | eye_masks[1]
+    fur_px = lab[head & (L > 45) & ~eyes_all]
+    fur = np.median(fur_px, 0) if len(fur_px) else np.array([90.0, 0, 0])
+    nonfur = head & ~eyes_all & (np.linalg.norm(lab - fur, axis=-1) > 18)
+    fl, fn = ndi.label(nonfur)
+    for i, sl in enumerate(ndi.find_objects(fl), start=1):
+        if sl is None:
+            continue
+        m = fl == i
+        a = m.sum()
+        if a < 0.0003 * area_fg:
+            continue
+        cy, cx = ndi.center_of_mass(m)
+        h_, w_ = sl[0].stop - sl[0].start, sl[1].stop - sl[1].start
+        if max(h_, w_) > 0.9 * d:  # the outline network, not a feature
+            continue
+        is_dark = np.median(L[m]) < 50
+        if cy < mid[1] - 0.15 * d and is_dark and w_ > 1.4 * h_ and abs(cx - mid[0]) < 1.1 * d:
+            side = "R" if cx < mid[0] else "L"
+            O[m] = reg.id(f"Brow {side}", ["Head"], Z["Brow"], sweep=False)
+        elif mid[1] < cy < mid[1] + 1.3 * d and abs(cx - mid[0]) < 0.6 * d:
+            O[m] = reg.id("Mouth", ["Head"], Z["Mouth"], sweep=False)
+    for i, (m, side) in enumerate(zip(eye_masks, ("R", "L"))):
+        O[m & (O == 0)] = reg.id(f"Eye White {side}", ["Head", f"Eye {side}"], Z["Eye White"], sweep=False, fill="color")
+    P[head & (P == 0)] = reg.id("Face", ["Head"], Z["Face"], fill="color")
+
+    # body and tail: the tail is what sticks out of the main body blob
+    body = fg & ~head
+    bys, bxs = np.nonzero(body)
+    if len(bys):
+        k = max(3, int(0.15 * np.sqrt(body.sum())))
+        disk = (np.add.outer(np.arange(-k, k + 1) ** 2, np.arange(-k, k + 1) ** 2) <= k * k)
+        core = ndi.binary_opening(body, structure=disk)
+        tl, tn = ndi.label(body & ~ndi.binary_dilation(core, iterations=2))
+        tails = [tl == i for i in range(1, tn + 1)]
+        tails = [m for m in tails if 0.01 * area_fg < m.sum() < 0.25 * body.sum() and _elongated_soft(m)]
+        if tails:
+            t = max(tails, key=lambda m: m.sum())
+            P[t] = reg.id("Tail", ["Body"], 10)
+        P[body & (P == 0)] = reg.id("Body", ["Body"], Z["Upper Body"])
+    return True
+
+
+def _elongated_soft(m):
+    ys, xs = np.nonzero(m)
+    if len(ys) < 10:
+        return False
+    ev = np.linalg.eigvalsh(np.cov(np.stack([xs, ys]).astype(np.float32)))
+    return ev[1] > 3 * max(ev[0], 1e-3)
+
+
 def _sam_eyes(sam, head_box, sc, found, face_full, box):
     """Find eyes the colour rules missed (painted eyes, irises the colour of the hair).
 
@@ -696,9 +873,44 @@ def _eye_parts(reg, O, m, side, lab):
         sizes = np.bincount(il.ravel())[1:]
         iris = ndi.binary_fill_holes(il == sizes.argmax() + 1) & ~lash
     lines = m & ~white & ~iris
-    O[m] = reg.id(f"Eye White {side}", path, Z["Eye White"], sweep=False, fill="color", hint=m)
-    O[iris] = reg.id(f"Iris {side}", path, Z["Iris"], sweep=False)
+    # complete what is hidden: the eye white is an ellipse, the iris a disc
+    white_full = m | _fit_ellipse(m)
+    iris_full = iris | (_fit_circle(iris, white) & ndi.binary_dilation(white_full, iterations=2)) if iris.any() else iris
+    O[m] = reg.id(f"Eye White {side}", path, Z["Eye White"], sweep=False, fill="color", hint=white_full)
+    O[iris] = reg.id(f"Iris {side}", path, Z["Iris"], sweep=False, hint=iris_full)
     O[lines | lash] = reg.id(f"Eye Line {side}", path, Z["Eye Line"], sweep=False)
+
+
+def _fit_ellipse(m):
+    cs, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    out = np.zeros(m.shape, np.uint8)
+    if cs:
+        c = max(cs, key=len)
+        if len(c) >= 5:
+            cv2.ellipse(out, cv2.fitEllipse(c), 1, -1)
+    return out.astype(bool)
+
+
+def _fit_circle(iris, white):
+    """Least-squares circle through the iris edge that borders the eye white
+    (edges against lashes or hair are where it is cut off, not its real rim)."""
+    edge = iris & ~ndi.binary_erosion(iris)
+    rim = edge & ndi.binary_dilation(white, iterations=2)
+    pts = np.argwhere(rim if rim.sum() >= 12 else edge).astype(np.float64)
+    out = np.zeros(iris.shape, np.uint8)
+    if len(pts) < 6:
+        return iris
+    y, x = pts[:, 0], pts[:, 1]
+    A = np.stack([x, y, np.ones_like(x)], 1)
+    b = x * x + y * y
+    (c0, c1, c2), *_ = np.linalg.lstsq(A, b, rcond=None)
+    cx, cy = c0 / 2, c1 / 2
+    r = np.sqrt(max(c2 + cx * cx + cy * cy, 1.0))
+    ys, xs = np.nonzero(iris)
+    if r > 1.5 * max(np.ptp(xs), np.ptp(ys), 1):  # nonsense fit
+        return iris
+    cv2.circle(out, (int(round(cx)), int(round(cy))), int(round(r)), 1, -1)
+    return out.astype(bool)
 
 
 def _split_props(A, reg):

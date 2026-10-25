@@ -89,3 +89,31 @@ def test_project_rebuild_and_folders(tmp_path):
     # an arm between two head layers splits the Head folder instead of reordering
     tree = build_tree([L("Hair", ["Head"], 90), L("Hand", ["Body", "Arm"], 85), L("Face", ["Head"], 80)])
     assert [c.name for c in tree.children] == ["Head", "Body", "Head"]
+
+
+def test_puppet_animates(tmp_path):
+    """The rig moves the head, blinks, keeps irises clipped and swings dangly parts."""
+    from live2d_psd.puppet import Animator, build_rig
+
+    src = tmp_path / "char.png"
+    draw_character(src)
+    _, parts, rendered, _ = convert(str(src), str(tmp_path / "a.psd"), mode="cartoon", log=lambda *a: None)
+    rig = build_rig(rendered, 500, 900)
+    assert set(rig.eyes) == {"L", "R"}
+    irises = [m for m in rig.meshes if m.role == "iris"]
+    assert irises and all(m.clip_to is not None and m.clip_to.role == "eye_white" for m in irises)
+    anim = Animator(rig)
+    face = next(m for m in rig.meshes if m.name == "Face")
+    rest = anim.vertices(face).copy()
+    anim.mode = "follow"
+    anim.mouse = (500, 100)  # top right: the head turns that way
+    for _ in range(60):
+        anim.update(1 / 30)
+        anim.step_physics(1 / 30)
+    moved = anim.vertices(face)
+    assert (moved[:, 0] - rest[:, 0]).mean() > 1.0
+    # a forced blink squashes the eye white
+    anim.p["EyeOpenL"] = anim.p["EyeOpenR"] = 0.0
+    ew = next(m for m in rig.meshes if m.role == "eye_white")
+    v = anim.vertices(ew)
+    assert np.ptp(v[:, 1]) < 0.3 * np.ptp(ew.pos0[:, 1])

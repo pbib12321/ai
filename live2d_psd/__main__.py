@@ -9,6 +9,8 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in ("edit", "build"):
         return _sub(argv)
+    if argv and argv[0] == "animate":
+        return _animate(argv[1:])
     ap = argparse.ArgumentParser(
         prog="python -m live2d_psd",
         description="Turn a flat, outlined 2D character image into a layered PSD ready for Live2D Cubism rigging.",
@@ -73,6 +75,26 @@ def _sub(argv):
         from .editor import serve
 
         serve(target, out, port=a.port, open_browser=not a.no_browser)
+
+
+
+
+def _animate(argv):
+    from .app import animate
+
+    ap = argparse.ArgumentParser(prog="python -m live2d_psd animate",
+                                 description="Turn a picture into an animated puppet and preview it.")
+    ap.add_argument("image")
+    ap.add_argument("--record", metavar="VIDEO", help="render to .mp4/.gif instead of opening a window")
+    ap.add_argument("--seconds", type=float, default=8.0)
+    ap.add_argument("--follow", action="store_true", help="start in mouse-follow mode (recording: a pretend mouse)")
+    ap.add_argument("--wind", type=float, default=0.8)
+    ap.add_argument("--redo", action="store_true", help="re-detect the parts even if a project exists")
+    ap.add_argument("--still-background", action="store_true", help="don't animate sky and plants")
+    ap.add_argument("--mode", choices=["auto", "cartoon", "anime"], default="auto")
+    a = ap.parse_args(argv)
+    animate(a.image, video=a.record, seconds=a.seconds, mode="follow" if a.follow else "idle", redo=a.redo,
+            wind=a.wind, scenery=not a.still_background, convert_mode=a.mode)
 
 
 if __name__ == "__main__":

@@ -42,7 +42,12 @@ def convert(
         sc = load_scene(src, log)
         if mode == "auto":
             detect(sc, log)
-            mode = "anime" if (sc.face is not None or sc.pose is not None) and not _is_flat_cartoon(sc) else "cartoon"
+            if (sc.face is not None or sc.pose is not None) and not _is_flat_cartoon(sc):
+                mode = "anime"
+            elif _is_flat_cartoon(sc) and _cartoon_rules_fit(sc):
+                mode = "cartoon"
+            else:
+                mode = "anime"  # the region/SAM parser, with creature mode for animals and mascots
             log(f"  using the {mode} pipeline")
         else:
             detect(sc, log)
@@ -62,6 +67,19 @@ def _is_flat_cartoon(sc) -> bool:
     counts = np.sort(counts)[::-1]
     coverage = counts[:24].sum() / counts.sum()
     return coverage > 0.82
+
+
+def _cartoon_rules_fit(sc) -> bool:
+    """Do the outline rules recognise this character (a face with pupils in its eyes)?"""
+    rgba = np.dstack([sc.rgb, np.where(sc.alpha >= 0.5, 255, 0).astype(np.uint8)])
+    try:
+        parts = auto_parts(segment(rgba))
+    except Exception:
+        return False
+    names = {p.name for p in parts}
+    eyes_ok = all(f"{k} {s}" in names for k in ("Pupil", "Eye White") for s in ("L", "R"))
+    unexplained = sum(n.startswith(("Face Feature", "Piece")) for n in names)
+    return "Face" in names and eyes_ok and unexplained <= 3
 
 
 def _convert_cartoon(src, sc, out, scale, parts_file, save_parts_file, preview, sweep, smooth, merge_de, log, project=None):
@@ -118,7 +136,7 @@ def _convert_anime(sc, src, out, scale, preview, sweep, background, log, project
     log(f"  {len(parts)} parts: " + ", ".join(p.name for p in sorted(parts, key=lambda p: -p.z)))
     log("completing hidden areas")
     keep_bg = background == "keep" or (background == "auto" and sc.had_background)
-    rendered = build_texture_layers(sc, parts, sweep=sweep, background=keep_bg, log=log)
+    rendered = build_texture_layers(sc, parts, sweep=sweep, background=keep_bg, log=log, carry=_is_flat_cartoon(sc))
     if scale != 1.0:
         rendered = [_rescale(r, scale) for r in rendered]
     W2, H2 = int(round(W * scale)), int(round(H * scale))
@@ -181,7 +199,7 @@ def build_project(folder: str, out: str, log=print):
                 parts.append(SemPart(m["name"], m["path"], m["z"], mask, sweep=m.get("sweep", True), fill=m.get("fill", "inpaint"),
                                      hidden_hint=mask if m["name"].startswith("Eye White") else None))
         keep_bg = st.get("background", "auto") != "drop" and sc.had_background
-        rendered = build_texture_layers(sc, parts, sweep=sweep, background=keep_bg, log=log)
+        rendered = build_texture_layers(sc, parts, sweep=sweep, background=keep_bg, log=log, carry=_is_flat_cartoon(sc))
         if scale != 1.0:
             rendered = [_rescale(r, scale) for r in rendered]
     else:

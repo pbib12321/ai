@@ -31,7 +31,10 @@ REPO_MODELS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 _URLS = {
     "pose_landmarker_heavy.task": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task",
     "lbpcascade_animeface.xml": "https://raw.githubusercontent.com/nagadomi/lbpcascade_animeface/master/lbpcascade_animeface.xml",
+    # MI-GAN (Picsart AI Research, ICCV 2023): a small inpainting GAN, ONNX pipeline
+    "migan_pipeline_v2.onnx": "https://huggingface.co/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx",
 }
+AI_INPAINT = os.environ.get("LIVE2D_PSD_AI_INPAINT", "1") != "0"
 _IMGLY = "https://registry.npmjs.org/@imgly/background-removal-node/-/background-removal-node-1.4.5.tgz"
 
 _log = print
@@ -117,6 +120,47 @@ def remove_background(rgb: np.ndarray) -> np.ndarray | None:
     o = s.run(["output"], {"input": x.transpose(2, 0, 1)[None]})[0][0, 0]
     o = (o - o.min()) / (o.max() - o.min() + 1e-6)
     return cv2.resize(o, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
+# --------------------------------------------------------------------------- inpainting
+
+_ai_failed = False
+
+
+def ai_inpaint(rgb: np.ndarray, hole: np.ndarray) -> np.ndarray | None:
+    """Fill ``hole`` with MI-GAN, or return None (then the caller uses OpenCV).
+
+    The ONNX pipeline takes a uint8 RGB image and a uint8 mask where 255 marks
+    known pixels and 0 the area to fill; it does its own resizing.
+    """
+    global _ai_failed
+    if _ai_failed or not AI_INPAINT or not hole.any():
+        return None
+    s = _ort("migan_pipeline_v2.onnx")
+    if s is None:
+        _ai_failed = True
+        return None
+    try:
+        ins = s.get_inputs()
+        img_in, mask_in = (ins[0], ins[1]) if "mask" not in ins[0].name.lower() else (ins[1], ins[0])
+        mask = np.where(hole, 0, 255).astype(np.uint8)
+        nchw = len(img_in.shape) == 4 and img_in.shape[1] == 3
+        if nchw:
+            feed = {img_in.name: rgb.transpose(2, 0, 1)[None].copy(), mask_in.name: mask[None, None]}
+        else:
+            feed = {img_in.name: rgb[None].copy(), mask_in.name: mask[None, ..., None]}
+        out = np.asarray(s.run(None, feed)[0])[0]
+        if out.shape[0] == 3 and out.shape[-1] != 3:
+            out = out.transpose(1, 2, 0)
+        if out.shape[:2] != rgb.shape[:2]:
+            out = cv2.resize(out.astype(np.uint8), (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_LINEAR)
+        if out.dtype != np.uint8:
+            out = np.clip(out if out.max() > 1.5 else out * 255, 0, 255).astype(np.uint8)
+        return np.where(hole[..., None], out, rgb)
+    except Exception as e:
+        _log(f"  AI inpainting unavailable ({e}); using OpenCV inpainting")
+        _ai_failed = True
+        return None
 
 
 # --------------------------------------------------------------------------- pose

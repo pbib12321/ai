@@ -3,9 +3,14 @@ scipy>=1.10
 opencv-python-headless>=4.8
 scikit-image>=0.21
 Pillow>=10.0
-# anime / shaded-art mode (optional: without them the tool uses colour rules only)
+# AI models (ISNet background removal, MobileSAM, MI-GAN inpainting) and body keypoints
 onnxruntime>=1.16
 mediapipe>=0.10
+# animated preview window and video export
+moderngl>=5.8
+pygame>=2.5
+imageio>=2.30
+imageio-ffmpeg>=0.4
 # only needed for the tests / for inspecting output
 psd-tools>=1.9
 pytest>=7

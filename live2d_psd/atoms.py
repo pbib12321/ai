@@ -130,7 +130,10 @@ def background_atoms(atoms: Atoms, lab: np.ndarray, matte: np.ndarray, protect: 
     if protect is not None:
         share = np.bincount(L.ravel(), weights=protect.ravel().astype(np.float64), minlength=atoms.n + 1) / np.maximum(atoms.area, 1)
         prot = share > 0.5
-    drop = (d_bg < 7) & (mean_m < 0.95) & ~prot
+    # only regions touching the real background can be background
+    outside = ndi.binary_dilation(matte < 0.05, iterations=int(2 * atoms.hw + 3))
+    touches = np.bincount(L.ravel(), weights=outside.ravel().astype(np.float64), minlength=atoms.n + 1) > 0
+    drop = (d_bg < 7) & (mean_m < 0.95) & ~prot & touches
     # small enclosed patch with exactly the background's colour (sky between arm and body)
     border = np.zeros(atoms.n + 1, bool)
     border[np.unique(np.concatenate([L[0], L[-1], L[:, 0], L[:, -1]]))] = True

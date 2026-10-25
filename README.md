@@ -1,33 +1,62 @@
 # live2d_psd
 
-Turns a 2D character picture into a layered PSD that is ready to rig in
-**Live2D Cubism Editor**, and that opens cleanly in Photopea or Photoshop.
+Turns a 2D picture (anime, cartoon, painted art, animals, mascots) into:
 
-It handles two kinds of art, picked automatically:
-
-| | **cartoon** mode | **anime** mode |
-| --- | --- | --- |
-| for | flat colours + dark outlines (Gumball, Rick and Morty, …) | anime, cel-shaded, painted or textured art |
-| pixels | redrawn clean: flat colours, smooth outlines, any `--scale` | the original pixels: shading, texture and soft hair edges kept |
-| parts from | colour regions + outline rules | face detection, body keypoints, MobileSAM, colour models |
-| background | expects a plain or transparent one | removed with ISNet; optionally kept as a filled-in layer |
+1. **An animated Live2D-style puppet** in a preview window, with idle
+   animation, mouse following, hair/cloth/tail physics, wind, and an animated
+   background (drifting clouds, swaying plants, waving grass).
+2. **A layered PSD** that is ready to rig in **Live2D Cubism Editor** (or to
+   open in Photopea or Photoshop).
 
 ```
-pip install -r requirements.txt
-python -m live2d_psd character.png                 # -> character_cubism.psd (+ preview, + editable project)
-python -m live2d_psd character.png --mode anime --background drop
-python -m live2d_psd edit character_cubism.l2d     # fix parts in your browser, then "Export PSD"
-python -m live2d_psd build character_cubism.l2d    # rebuild the PSD from a saved project
+./setup_mac.sh                                   # once (macOS Apple Silicon; Linux/Windows: pip install -r requirements.txt)
+source .venv/bin/activate
+python live2d.py picture.png                     # convert + open the animated preview
+python live2d.py picture.png --follow            # start in mouse-follow mode
+python live2d.py picture.png --record out.mp4    # save a video instead
+python live2d.py edit picture_cubism.l2d         # fix parts in the browser editor, then run again
+python live2d.py convert picture.png             # just the PSD
 ```
 
-Each conversion writes:
+### The preview
 
-| file | what it is |
+| key | |
 | --- | --- |
-| `*_cubism.psd` | the layered PSD |
-| `*_cubism.preview.png` | the part map, the re-assembled image and every layer |
-| `*_cubism.l2d/` | the editable project (part map + part list) for `edit` / `build` |
-| `*_cubism.parts.json` | cartoon mode only: colour-region ids per part (older `--parts` workflow) |
+| **M** | idle ↔ mouse follow: head, eyes and body follow the mouse |
+| **Q / W** | less / more wind |
+| **P** | physics on / off |
+| **B** | background on / off |
+| **Space** | pause |
+| **C** | screenshot |
+| **R** | start / stop recording an .mp4 |
+| **+ / −** | zoom |
+| **Esc** | quit |
+
+The puppet is driven by the standard Live2D parameters:
+
+- **Head**: angle X/Y/Z, which slides each layer by its depth plus a dome
+  warp, so the face turns instead of sliding flat.
+- **Body**: angle X/Z.
+- **Breathing**.
+- **Eyes**: per-eye blinking (random, with occasional double blinks) and
+  eyeball X/Y. Irises and pupils are clipped to the eye white, so they never
+  leave the eye.
+- **Mouth**: opening.
+- **Brows**: move with the blink.
+- **Arms**: sway.
+- **Ears**: twitch (animals).
+- **Physics**: front, side and back hair, skirts, sleeves, tails and ears
+  hang from an anchor on two-link pendulums. They swing from the motion of
+  what they hang from, and from gusty wind.
+
+The idle mode looks around with small saccades and breathes.
+
+**Note on `.moc3`:** this is our own runtime. Live2D's `.moc3` format and
+Cubism Core are proprietary, and the open projects that write `.moc3`
+(e.g. image2live2d) say the remaining barrier is Live2D's licence. For a real
+Cubism model, import the PSD into Cubism Editor. Its layers, names, folders
+and filled-in hidden areas are prepared the way the official sample models
+are.
 
 ## What the PSD contains
 
@@ -121,6 +150,25 @@ rules.
 | MediaPipe pose landmarker | body keypoints | Apache-2.0 | storage.googleapis.com |
 | lbpcascade_animeface | anime faces | MIT | github.com/nagadomi |
 | MobileSAM | AI select, object masks | Apache-2.0 | `models/` in this repo, made by `tools/export_mobilesam.py` |
+| MI-GAN | AI inpainting of hidden areas and of the background behind the character | see MI-GAN `LICENSE-WEIGHTS` | huggingface.co/andraniksargsyan/migan (`LIVE2D_PSD_AI_INPAINT=0` to turn off) |
+
+## Animals, mascots and backgrounds
+
+- **Creature mode**: when no human face or body is found, the eyes are found
+  as a pair of round blobs. The head is everything above a chin line set from
+  their spacing (or MobileSAM's mask when it agrees). Ears are what sticks out
+  of the skull, and the tail is what sticks out of the body.
+- **Hidden eye parts are redrawn**: the iris is completed as a circle fitted
+  to its visible rim, and the eye white as an ellipse. Other hidden areas are
+  filled by MI-GAN when it's available, and by OpenCV inpainting otherwise.
+  Flat cartoon art copies its own pixels along the hidden shape, so outlines
+  continue underneath.
+- **Background**:
+  - The sky (blue or cloud colours connected to the top, with clouds in it)
+    becomes a seamlessly looping, slowly drifting texture.
+  - Green foliage becomes plants hinged where they enter the picture.
+  - Wide green strips at the bottom become waving grass.
+  - Everything is painted out underneath, so nothing tears when it moves.
 
 ## Limits
 
@@ -131,6 +179,12 @@ rules.
   side of a skirt, can't be invented. Hidden areas are extended and inpainted
   from what is visible.
 - Painted eyes with no outlines are found less reliably than cel-shaded ones.
+- No automatic method gets every picture right. When a part is wrong, open
+  the editor, fix it with AI select or the brush, and run again. The fixed
+  parts are reused.
+- The best open-source layer decomposer, See-through (SIGGRAPH 2026), needs
+  an NVIDIA GPU with 12–16 GB of memory. It isn't used here because it
+  doesn't run on a Mac.
 - Keypoints for poses the body detector doesn't understand (lying down, heavy
   foreshortening) can put arms and legs in the wrong place. AI select in the
   editor is the quick fix.

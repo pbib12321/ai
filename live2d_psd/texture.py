@@ -17,7 +17,11 @@ from .render import RenderedLayer
 from .semantic import Scene, SemPart
 
 
-def build_texture_layers(sc: Scene, parts: list[SemPart], sweep: float = 1.0, background: bool = False, log=print):
+def build_texture_layers(sc: Scene, parts: list[SemPart], sweep: float = 1.0, background: bool = False, log=print,
+                         carry: bool = False):
+    """carry: hidden areas reached by the sweep copy the real pixels along it
+    (outlines continue underneath; right for flat-colour art), instead of
+    being inpainted (right for shaded/painted art, where copies streak)."""
     H, W = sc.fg.shape
     parts = sorted(parts, key=lambda p: -p.z)
     flat = (np.arange(H * W, dtype=np.int64) + 1).reshape(H, W)
@@ -26,10 +30,13 @@ def build_texture_layers(sc: Scene, parts: list[SemPart], sweep: float = 1.0, ba
     front = np.zeros((H, W), bool)
     for i, p in enumerate(parts):
         own = p.mask
-        hidden_ok = front & sc.fg & ~own
+        # only paint hidden areas under parts that are fully opaque there; under
+        # a see-through edge (a gap between the legs) they would show
+        hidden_ok = front & sc.fg & ~own & (sc.alpha > 0.97)
         complete = own.copy()
         rgb = np.zeros((H, W, 3), np.uint8)
         rgb[own] = sc.rgb[own]
+        carried = np.zeros((H, W), bool)
         if hidden_ok.any():
             holes = ndi.binary_fill_holes(own) & hidden_ok
             if p.hidden_hint is not None:
@@ -41,10 +48,14 @@ def build_texture_layers(sc: Scene, parts: list[SemPart], sweep: float = 1.0, ba
                 # inpainting, since copied pixels smear texture into streaks
                 ext = _sweep(flat * own, own, covers, hidden_ok, hw, sweep)
                 if ext is not None:
-                    complete |= (ext > 0)
-            todo = complete & ~own
+                    take = (ext > 0) & ~complete
+                    if carry:
+                        rgb[take] = sc.rgb.reshape(-1, 3)[ext[take] - 1]
+                        carried |= take
+                    complete |= take
+            todo = complete & ~own & ~carried
             if todo.any():
-                rgb = _paint(rgb, complete & ~todo, todo, p.fill)
+                rgb = _paint(rgb, own | carried, todo, p.fill)
         alpha = np.where(own, sc.alpha, 0).astype(np.float32)
         alpha[complete & ~own] = 1.0
         layer = _crop(p.name, p.path, p.z, rgb, alpha)
@@ -86,9 +97,18 @@ def _paint(rgb, known, todo, mode):
         ks = wsum > 0.5
     else:
         small, ks = src, k
-    painted = cv2.inpaint(small, (~ks).astype(np.uint8), 5, cv2.INPAINT_TELEA) if (~ks).any() else small
-    if s < 1:
-        painted = cv2.resize(painted, (w, h), interpolation=cv2.INTER_LINEAR)
+    painted = None
+    if mode != "color" and t.sum() > 400:
+        from .models import ai_inpaint
+
+        # AI fill at full resolution for big hidden areas of textured parts
+        ai = ai_inpaint(src, ~k)
+        if ai is not None:
+            painted = ai
+    if painted is None:
+        painted = cv2.inpaint(small, (~ks).astype(np.uint8), 5, cv2.INPAINT_TELEA) if (~ks).any() else small
+        if s < 1:
+            painted = cv2.resize(painted, (w, h), interpolation=cv2.INTER_LINEAR)
     if mode == "color":
         med = np.median(crop[k], 0).astype(np.float32)
         d = ndi.distance_transform_edt(~k)
