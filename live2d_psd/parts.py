@@ -117,7 +117,6 @@ def _side(cx, center_x):
 
 def auto_parts(seg: Segmentation, merge_de: float = 10.0) -> list[Part]:
     R = seg.regions
-    labels = seg.labels
     ys, xs = np.nonzero(seg.fg)
     fy0, fy1 = ys.min(), ys.max()
     fh = fy1 - fy0
