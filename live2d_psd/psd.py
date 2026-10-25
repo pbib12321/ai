@@ -51,17 +51,26 @@ class _Group:
 
 
 def build_tree(layers) -> _Group:
-    """layers: objects with name, path, z, rgba, left, top (any order)."""
+    """Nest layers (objects with name, path, z, rgba, left, top) into folders.
+
+    Layers are placed strictly in z order.  A folder holds a consecutive run
+    of layers, so when a part has to sit between two parts of another folder
+    (an arm in front of the head but behind the hair), that folder is split
+    into two runs with the same name instead of breaking the draw order.
+    """
     root = _Group("")
+    stack = [root]
     for L in sorted(layers, key=lambda l: -l.z):
-        g = root
-        for folder in L.path:
-            sub = next((c for c in g.children if isinstance(c, _Group) and c.name == folder), None)
-            if sub is None:
-                sub = _Group(folder)
-                g.children.append(sub)
-            g = sub
-        g.children.append(_Pixel(L.name, L.rgba, L.left, L.top))
+        path = list(L.path)
+        common = 0
+        while common < len(path) and common + 1 < len(stack) and stack[common + 1].name == path[common]:
+            common += 1
+        del stack[common + 1 :]
+        for folder in path[common:]:
+            g = _Group(folder)
+            stack[-1].children.append(g)
+            stack.append(g)
+        stack[-1].children.append(_Pixel(L.name, L.rgba, L.left, L.top))
     return root
 
 

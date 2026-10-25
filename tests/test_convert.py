@@ -67,3 +67,25 @@ def test_convert(tmp_path):
     fa = np.asarray(face.topil())[..., 3]
     x0, y0 = face.left, face.top
     assert fa[160 - y0, 195 - x0] == 255 and fa[160 - y0, 305 - x0] == 255
+
+
+def test_project_rebuild_and_folders(tmp_path):
+    """The saved project rebuilds the same PSD; folders keep the draw order."""
+    from live2d_psd import build_project
+    from live2d_psd.psd import build_tree
+
+    src = tmp_path / "char.png"
+    draw_character(src)
+    convert(str(src), str(tmp_path / "a.psd"), mode="cartoon", project=str(tmp_path / "a.l2d"), log=lambda *a: None)
+    build_project(str(tmp_path / "a.l2d"), str(tmp_path / "b.psd"), log=lambda *a: None)
+    a = np.asarray(psd_tools.PSDImage.open(tmp_path / "a.psd").composite(force=True).convert("RGBA"), np.float32)
+    b = np.asarray(psd_tools.PSDImage.open(tmp_path / "b.psd").composite(force=True).convert("RGBA"), np.float32)
+    assert np.abs(a - b).mean() < 0.5
+
+    class L:
+        def __init__(self, name, path, z):
+            self.name, self.path, self.z, self.rgba, self.left, self.top = name, path, z, np.zeros((1, 1, 4), np.uint8), 0, 0
+
+    # an arm between two head layers splits the Head folder instead of reordering
+    tree = build_tree([L("Hair", ["Head"], 90), L("Hand", ["Body", "Arm"], 85), L("Face", ["Head"], 80)])
+    assert [c.name for c in tree.children] == ["Head", "Body", "Head"]

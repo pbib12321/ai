@@ -54,7 +54,8 @@ def build_layers(seg: Segmentation, parts: list[Part], sweep: float = 1.0) -> li
     hw = seg.line_halfwidth
     parts = sorted(parts, key=lambda p: -p.z)  # front first
     n = len(parts)
-    fills = [np.isin(seg.labels, p.regions) for p in parts]
+    # parts can come with their own pixel mask (edited in the editor) or as region ids
+    fills = [p.mask & ~seg.line if getattr(p, "mask", None) is not None else np.isin(seg.labels, p.regions) for p in parts]
 
     # ---------------------------------------------------------------- outlines
     r = int(np.ceil(2 * hw + 1))

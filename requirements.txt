@@ -3,6 +3,9 @@ scipy>=1.10
 opencv-python-headless>=4.8
 scikit-image>=0.21
 Pillow>=10.0
+# anime / shaded-art mode (optional: without them the tool uses colour rules only)
+onnxruntime>=1.16
+mediapipe>=0.10
 # only needed for the tests / for inspecting output
 psd-tools>=1.9
 pytest>=7

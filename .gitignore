@@ -3,3 +3,4 @@ __pycache__/
 *.psd
 *.parts.json
 *.preview.png
+*.l2d/

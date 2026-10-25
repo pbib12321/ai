@@ -20,7 +20,7 @@ from skimage.color import rgb2lab
 from .segment import Segmentation
 
 
-@dataclass
+@dataclass(eq=False)
 class Part:
     name: str
     path: list[str]  # PSD group folders, outermost first
@@ -30,6 +30,7 @@ class Part:
     split_lines: bool = False  # put this part's interior strokes on their own layer
     sweep: bool = True  # continue this part underneath the parts covering it
     line_layer: str | None = None  # name for the outline layer (eyes)
+    mask: np.ndarray | None = field(default=None, repr=False)  # pixel mask overriding regions
     extra: dict = field(default_factory=dict)
 
     def to_json(self):

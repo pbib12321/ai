@@ -55,3 +55,58 @@ def save_preview(path, seg, parts, rendered, merged, thumb=260):
         sheet.paste(bg.convert("RGB"), (cx + 4, cy + 20))
         d.text((cx + 4, cy + 4), "/".join(L.path + [L.name])[:40], fill="black")
     sheet.save(path)
+
+
+def save_semantic_preview(path, sc, parts, rendered, merged, thumb=260):
+    """Same sheet for the anime pipeline: part map instead of numbered regions."""
+    h, w = sc.fg.shape
+    rng = np.random.default_rng(7)
+    partmap = np.full((h, w, 3), 255, np.uint8)
+    partmap[sc.fg] = (0.35 * sc.rgb[sc.fg] + 0.65 * 255).astype(np.uint8)
+    for p in sorted(parts, key=lambda p: p.z):
+        col = rng.integers(40, 230, 3)
+        partmap[p.mask] = (0.45 * sc.rgb[p.mask] + 0.55 * col).astype(np.uint8)
+    for p in parts:
+        ys, xs = np.nonzero(p.mask)
+        if len(ys):
+            org = (int(np.median(xs)) - 20, int(np.median(ys)))
+            cv2.putText(partmap, p.name, org, cv2.FONT_HERSHEY_SIMPLEX, max(0.35, h / 2500), (255, 255, 255), 3)
+            cv2.putText(partmap, p.name, org, cv2.FONT_HERSHEY_SIMPLEX, max(0.35, h / 2500), (0, 0, 0), 1)
+
+    _sheet(path, partmap, merged, rendered, thumb, "parts")
+
+
+def _sheet(path, left_img, merged, rendered, thumb, label):
+    big_h = thumb * 3
+    left = []
+    for img in (left_img, merged):
+        im = Image.fromarray(img)
+        if im.mode == "RGBA":
+            bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
+            bg.alpha_composite(im)
+            im = bg
+        im = im.convert("RGB")
+        im.thumbnail((10_000, big_h))
+        left.append(im)
+    layers = sorted(rendered, key=lambda l: -l.z)
+    cols = 6
+    rows = (len(layers) + cols - 1) // cols
+    lw = sum(i.width for i in left) + 20
+    sheet = Image.new("RGB", (lw + cols * thumb, max(big_h + 30, rows * (thumb + 24))), "white")
+    d = ImageDraw.Draw(sheet)
+    x = 0
+    for i, im in enumerate(left):
+        sheet.paste(im, (x, 24))
+        d.text((x + 4, 4), [label, "PSD composite"][i], fill="black")
+        x += im.width + 10
+    checker = (np.indices((thumb, thumb)).sum(0) // 8 % 2 * 40 + 200).astype(np.uint8)
+    for i, L in enumerate(layers):
+        cx = lw + (i % cols) * thumb
+        cy = (i // cols) * (thumb + 24)
+        im = Image.fromarray(L.rgba)
+        im.thumbnail((thumb - 8, thumb - 8))
+        bg = Image.fromarray(np.dstack([checker] * 3 + [np.full_like(checker, 255)])).crop((0, 0, im.width, im.height))
+        bg.alpha_composite(im)
+        sheet.paste(bg.convert("RGB"), (cx + 4, cy + 20))
+        d.text((cx + 4, cy + 4), "/".join(L.path + [L.name])[:40], fill="black")
+    sheet.save(path)
