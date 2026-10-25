@@ -6,6 +6,9 @@ Pillow>=10.0
 # AI models (ISNet background removal, MobileSAM, MI-GAN inpainting) and body keypoints
 onnxruntime>=1.16
 mediapipe>=0.10
+# anime body-part segmentation (See-through SAM-HQ, 1.3 GB download on first use; Apple GPU on M-series Macs)
+torch>=2.2
+einops>=0.7
 # animated preview window and video export
 moderngl>=5.8
 pygame>=2.5

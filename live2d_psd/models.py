@@ -11,6 +11,8 @@ the ``LIVE2D_PSD_MODELS`` environment variable):
   closed products).
 * MediaPipe pose landmarker (Apache-2.0) from Google's model storage.
 * lbpcascade_animeface (MIT) anime face detector from GitHub.
+* anime-segmentation's ISNet-IS (skytnt, Apache-2.0), trained on anime
+  characters; much better than the general ISNet on crowded anime pictures.
 * MobileSAM (Apache-2.0) exported to ONNX; shipped in the repository's
   ``models/`` folder, see tools/export_mobilesam.py.
 """
@@ -33,6 +35,8 @@ _URLS = {
     "lbpcascade_animeface.xml": "https://raw.githubusercontent.com/nagadomi/lbpcascade_animeface/master/lbpcascade_animeface.xml",
     # MI-GAN (Picsart AI Research, ICCV 2023): a small inpainting GAN, ONNX pipeline
     "migan_pipeline_v2.onnx": "https://huggingface.co/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx",
+    # skytnt/anime-segmentation: ISNet trained on anime characters (several per picture)
+    "isnetis.onnx": "https://huggingface.co/skytnt/anime-seg/resolve/main/isnetis.onnx",
 }
 AI_INPAINT = os.environ.get("LIVE2D_PSD_AI_INPAINT", "1") != "0"
 _IMGLY = "https://registry.npmjs.org/@imgly/background-removal-node/-/background-removal-node-1.4.5.tgz"
@@ -110,8 +114,7 @@ def _ort(name):
     return s
 
 
-def remove_background(rgb: np.ndarray) -> np.ndarray | None:
-    """Soft foreground matte in [0, 1] for the main subject, or None."""
+def _isnet_general(rgb):
     s = _ort("isnet_medium.onnx") or _ort("isnet_small.onnx")
     if s is None:
         return None
@@ -120,6 +123,38 @@ def remove_background(rgb: np.ndarray) -> np.ndarray | None:
     o = s.run(["output"], {"input": x.transpose(2, 0, 1)[None]})[0][0, 0]
     o = (o - o.min()) / (o.max() - o.min() + 1e-6)
     return cv2.resize(o, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
+def _isnet_anime(rgb):
+    s = _ort("isnetis.onnx")
+    if s is None:
+        return None
+    S = 1024
+    h, w = rgb.shape[:2]
+    k = S / max(h, w)
+    nh, nw = max(1, int(h * k)), max(1, int(w * k))
+    ph, pw = (S - nh) // 2, (S - nw) // 2
+    x = np.zeros((S, S, 3), np.float32)
+    x[ph:ph + nh, pw:pw + nw] = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_AREA).astype(np.float32) / 255
+    o = s.run(None, {"img": x.transpose(2, 0, 1)[None]})[0][0, 0][ph:ph + nh, pw:pw + nw]
+    return np.clip(cv2.resize(o, (w, h), interpolation=cv2.INTER_LINEAR), 0, 1)
+
+
+def _unsure(m):
+    return float(np.mean((m > 0.15) & (m < 0.85)))
+
+
+def remove_background(rgb: np.ndarray) -> np.ndarray | None:
+    """Soft foreground matte in [0, 1] for the character(s), or None.
+
+    Runs the anime-trained and the general ISNet and keeps the one that is
+    more certain about this picture (fewer half-transparent pixels): the
+    anime model keeps every character in group pictures, the general one is
+    better on western comics and photo-like art."""
+    mattes = [m for m in (_isnet_anime(rgb), _isnet_general(rgb)) if m is not None]
+    if not mattes:
+        return None
+    return min(mattes, key=_unsure)
 
 
 # --------------------------------------------------------------------------- inpainting

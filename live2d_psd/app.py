@@ -11,7 +11,7 @@ def animate(src: str, video: str | None = None, seconds: float = 8.0, mode: str 
             wind: float = 0.8, scenery: bool = True, convert_mode: str = "auto", log=print):
     from . import build_project, convert
     from .project import load_project
-    from .puppet import build_rig
+    from .puppet import build_stage
     from .scenery import build_scenery
 
     base = os.path.splitext(src)[0]
@@ -34,9 +34,9 @@ def animate(src: str, video: str | None = None, seconds: float = 8.0, mode: str 
         layers += build_scenery(rgba[..., :3], alpha, animate=scenery, log=log)
     H, W = labels.shape
     creature = not any(r.name.startswith(("Upper Body", "Top", "Hair")) for r in layers)
-    rig = build_rig(layers, W, H, creature=creature)
+    rig = build_stage(layers, W, H, creature=creature)
     n_phys = sum(m.chain is not None for m in rig.meshes)
-    log(f"rig: {len(rig.meshes)} meshes, {n_phys} with physics, eyes: {', '.join(sorted(rig.eyes)) or 'none'}")
+    log(f"rig: {len(rig.rigs)} character(s), {len(rig.meshes)} meshes, {n_phys} with physics")
     if video:
         from .viewer import record
 

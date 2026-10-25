@@ -15,7 +15,7 @@ import time
 
 import numpy as np
 
-from .puppet import Animator, Rig
+from .puppet import Animator, Rig, Stage
 
 _VS = """
 #version 330
@@ -68,7 +68,7 @@ def _premul(rgba):
 
 
 class Renderer:
-    def __init__(self, ctx, rig: Rig):
+    def __init__(self, ctx, rig: "Rig | Stage"):
         import moderngl
 
         self.mgl = moderngl
@@ -78,7 +78,7 @@ class Renderer:
         self.sky_prog = ctx.program(vertex_shader=_VS, fragment_shader=_FS_SKY)
         self.copy_prog = ctx.program(vertex_shader=_VS, fragment_shader=_FS_COPY)
         self.items = []
-        for m in rig.meshes:
+        for m in rig.meshes:  # a Stage lists every character's meshes in depth order
             tex = ctx.texture(m.size, 4, _premul(m.rgba).tobytes())
             tex.build_mipmaps()
             tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
@@ -112,9 +112,12 @@ class Renderer:
             self.clip_fbo = self.ctx.framebuffer(color_attachments=[self.clip_tex])
         return self.clip_fbo
 
-    def draw(self, anim: Animator, target, viewport, zoom=1.0, pan=(0.0, 0.0), clear=(0.16, 0.17, 0.2)):
-        """Draw the puppet into ``target`` (a framebuffer) fitted into ``viewport`` (x, y, w, h)."""
+    def draw(self, anim, target, viewport, zoom=1.0, pan=(0.0, 0.0), clear=(0.16, 0.17, 0.2)):
+        """Draw the puppet into ``target`` (a framebuffer) fitted into ``viewport`` (x, y, w, h).
+
+        ``anim`` is one Animator, or a list with one per character of a Stage."""
         ctx, rig = self.ctx, self.rig
+        anims = anim if isinstance(anim, (list, tuple)) else [anim]
         vx, vy, vw, vh = viewport
         s = min(vw / rig.width, vh / rig.height) * zoom
         # canvas pixels -> NDC of the viewport, y down
@@ -144,11 +147,11 @@ class Renderer:
                 fbo.use()
                 ctx.viewport = viewport
                 fbo.clear(0, 0, 0, 0, viewport=viewport)
-                self._draw_item(it, anim)
+                self._draw_item(it, anims)
                 # clipped layers only show where the eye white already is
                 ctx.blend_func = self.mgl.DST_ALPHA, self.mgl.ONE_MINUS_SRC_ALPHA
                 for c in clipped[id(m)]:
-                    self._draw_item(c, anim)
+                    self._draw_item(c, anims)
                 ctx.blend_func = self.mgl.ONE, self.mgl.ONE_MINUS_SRC_ALPHA
                 target.use()
                 ctx.viewport = viewport
@@ -158,10 +161,11 @@ class Renderer:
                 self.copy_prog["u_tex"].value = 0
                 self.quad.render(self.mgl.TRIANGLE_STRIP)
                 continue
-            self._draw_item(it, anim)
+            self._draw_item(it, anims)
 
-    def _draw_item(self, it, anim):
+    def _draw_item(self, it, anims):
         m = it["mesh"]
+        anim = anims[min(m.owner, len(anims) - 1)]
         v = anim.vertices(m)
         it["vbo"].write(np.hstack([v, m.uv]).astype("f4").tobytes())
         it["tex"].use(0)
@@ -203,8 +207,10 @@ def run_window(rig: Rig, title="Live2D preview", fps=60):
         pygame.display.gl_set_attribute(pygame.GL_MULTISAMPLESAMPLES, 0)
         pygame.display.set_mode(size, flags)
     ctx = moderngl.create_context()
-    ren = Renderer(ctx, rig)
-    anim = Animator(rig)
+    stage = rig if isinstance(rig, Stage) else Stage(rig.width, rig.height, [rig])
+    ren = Renderer(ctx, stage)
+    anims = [Animator(r, seed=i + 1) for i, r in enumerate(stage.rigs)]
+    anim = _Group(anims)
     clock = pygame.time.Clock()
     zoom, paused = 1.0, False
     recorder = None
@@ -261,7 +267,7 @@ def run_window(rig: Rig, title="Live2D preview", fps=60):
         w, h = pygame.display.get_window_size()
         fb = ctx.detect_framebuffer()
         fw, fh = fb.size  # may be larger than the window on Retina screens
-        ren.draw(anim, fb, (0, 0, fw, fh), zoom=zoom)
+        ren.draw(anims, fb, (0, 0, fw, fh), zoom=zoom)
         if recorder is not None:
             recorder.add(np.frombuffer(fb.read(components=3), np.uint8).reshape(fh, fw, 3)[::-1])
         pygame.display.flip()
@@ -334,8 +340,10 @@ def record(rig: Rig, out: str, seconds=8.0, fps=30, mode="idle", max_side=900, w
     fbo = ctx.framebuffer(color_attachments=[color])
     resolve_tex = ctx.renderbuffer((w, h), 4)
     resolve = ctx.framebuffer(color_attachments=[resolve_tex])
-    ren = Renderer(ctx, rig)
-    anim = Animator(rig)
+    stage = rig if isinstance(rig, Stage) else Stage(rig.width, rig.height, [rig])
+    ren = Renderer(ctx, stage)
+    anims = [Animator(r, seed=i + 1) for i, r in enumerate(stage.rigs)]
+    anim = _Group(anims)
     anim.mode = mode
     anim.wind = wind
     frames = []
@@ -343,13 +351,35 @@ def record(rig: Rig, out: str, seconds=8.0, fps=30, mode="idle", max_side=900, w
     n = int(seconds * fps)
     for i in range(n):
         t = i * dt
-        if mode == "follow":  # a pretend mouse drawing a slow figure-eight around the head
-            anim.mouse = (rig.head_center[0] + math.sin(t * 0.9) * rig.width * 0.45,
-                          rig.head_center[1] + math.sin(t * 1.8) * rig.height * 0.25)
+        if mode == "follow":  # a pretend mouse drawing a slow figure-eight around the picture
+            hc = stage.rigs[0].head_center
+            anim.mouse = (hc[0] + math.sin(t * 0.9) * rig.width * 0.45, hc[1] + math.sin(t * 1.8) * rig.height * 0.25)
         anim.update(dt)
         anim.step_physics(dt)
-        ren.draw(anim, fbo, (0, 0, w, h))
+        ren.draw(anims, fbo, (0, 0, w, h))
         ctx.copy_framebuffer(resolve, fbo)
         frames.append(np.frombuffer(resolve.read(components=3), np.uint8).reshape(h, w, 3)[::-1].copy())
     write_video(out, frames, fps)
     return out
+
+
+class _Group:
+    """Lets the window and recorder treat several animators like one."""
+
+    def __init__(self, anims):
+        object.__setattr__(self, "anims", anims)
+
+    def __getattr__(self, k):
+        return getattr(self.anims[0], k)
+
+    def __setattr__(self, k, v):
+        for a in self.anims:
+            setattr(a, k, v)
+
+    def update(self, dt):
+        for a in self.anims:
+            a.update(dt)
+
+    def step_physics(self, dt):
+        for a in self.anims:
+            a.step_physics(dt)

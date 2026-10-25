@@ -1,6 +1,6 @@
 """Animated background: split the scene behind the character into moving layers.
 
-* Sky: the sky region (blue / cloud colours connected to the top edge) becomes
+* Sky: the smooth region connected to the top edge (any colour) becomes
   a scrolling, seamlessly looping texture seen through a fixed mask, so
   clouds drift slowly.
 * Plants: green foliage becomes separate layers that sway in the wind,
@@ -47,25 +47,26 @@ def build_scenery(rgb: np.ndarray, alpha: np.ndarray, animate: bool = True, log=
         return [RenderedLayer("Background", ["Background"], -100, np.dstack([bg, np.full((H, W), 255, np.uint8)]), 0, 0)]
     lab = rgb2lab(bg.astype(np.float32) / 255)
     L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
-    hue = (np.degrees(np.arctan2(b, a)) + 360) % 360
-    chroma = np.hypot(a, b)
     yy = np.mgrid[0:H, 0:W][0]
 
-    # ---- sky: blue or cloud-white, connected to the top, in the upper part
-    blue = (hue > 200) & (hue < 300) & (chroma > 8) & (L > 30)
-    cloud = (L > 78) & (chroma < 14)
-    cand = (blue | cloud) & (yy < 0.75 * H)
+    # ---- sky: the smooth region connected to the top edge, any colour
+    # (blue day, orange sunset, purple dusk); clouds are soft, not detailed
+    gray = cv2.cvtColor(bg, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    gx, gy = np.gradient(cv2.GaussianBlur(gray, (0, 0), 1.5))
+    detail = cv2.GaussianBlur(np.hypot(gx, gy), (0, 0), 3)
+    green_like = (a < -6) & (b > 2)
+    cand = (detail < 4.0) & (yy < 0.75 * H) & ~green_like & (L > 15)
     cand = ndi.binary_opening(cand, iterations=2)
     lb, n = ndi.label(cand)
     top_ids = np.unique(lb[0][lb[0] > 0])
     sky = np.isin(lb, top_ids) if len(top_ids) else np.zeros((H, W), bool)
+    sky = ndi.binary_closing(sky, iterations=4)
     sky = ndi.binary_fill_holes(sky) & (yy < 0.8 * H)
-    # a flat backdrop gains nothing from scrolling: there must be clouds in it
-    cloud_share = (cloud & sky).sum() / max(1, sky.sum())
-    has_sky = sky.mean() > 0.03 and 0.03 < cloud_share < 0.85 and float(rgb[sky].std()) > 6
+    # a flat backdrop gains nothing from scrolling: it needs clouds or a gradient
+    has_sky = sky.mean() > 0.04 and float(rgb[sky].std()) > 6
 
     # ---- vegetation: green, not sky
-    green = (a < -6) & (b > 2) & (L > 12) & (L < 92) & ~sky  # green, not teal or blue
+    green = green_like & (L > 12) & (L < 92) & ~sky  # green, not teal or blue
     green = ndi.binary_opening(green, iterations=1)
     green = ndi.binary_closing(green, iterations=3)
     lb, n = ndi.label(green)

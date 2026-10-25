@@ -146,11 +146,30 @@ rules.
 
 | model | used for | licence | from |
 | --- | --- | --- | --- |
-| ISNet (DIS) | background removal | AGPL-3.0 | npm `@imgly/background-removal-node` |
+| anime-segmentation ISNet-IS | background removal for anime (keeps every character in group pictures) | Apache-2.0 | huggingface.co/skytnt/anime-seg |
+| ISNet (DIS) | background removal for other art (both run; the more certain one is used) | AGPL-3.0 | npm `@imgly/background-removal-node` |
 | MediaPipe pose landmarker | body keypoints | Apache-2.0 | storage.googleapis.com |
 | lbpcascade_animeface | anime faces | MIT | github.com/nagadomi |
 | MobileSAM | AI select, object masks | Apache-2.0 | `models/` in this repo, made by `tools/export_mobilesam.py` |
+| See-through body-part parser (SAM-HQ ViT-H, 19 classes) | the main anime part segmentation, several characters per picture | Apache-2.0 | huggingface.co/24yearsold/l2d_sam_iter2 (1.3 GB; `LIVE2D_PSD_PARTSEG=0` to turn off) |
 | MI-GAN | AI inpainting of hidden areas and of the background behind the character | see MI-GAN `LICENSE-WEIGHTS` | huggingface.co/andraniksargsyan/migan (`LIVE2D_PSD_AI_INPAINT=0` to turn off) |
+
+## Pictures with several characters
+
+The body-part model finds every face. The picture is split into one region per
+character, grown along the drawn edges, and each character gets its own
+`Character N/` folder in the PSD and its own independent rig in the preview
+(bigger face = closer). They blink and look around on their own timing.
+
+## Your own test pictures
+
+```
+python tools/benchmark.py my_pictures/ results/
+```
+
+This runs every picture in a folder and writes each preview sheet, plus
+`overview.png` (all part maps side by side) and `report.txt`. Keep your tricky
+pictures there and rerun it after changing anything.
 
 ## Animals, mascots and backgrounds
 

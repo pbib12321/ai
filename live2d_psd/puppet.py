@@ -28,6 +28,8 @@ import numpy as np
 
 
 def role_of(name: str, path: list[str]) -> str:
+    if path and path[0].startswith("Character "):
+        path = path[1:]
     n = name.lower()
     folders = " ".join(p.lower() for p in path)
     if n.startswith("background"):
@@ -56,8 +58,14 @@ def role_of(name: str, path: list[str]) -> str:
         return "hair_back"
     if n.startswith("hair"):
         return "hair_side"
+    if n.startswith("earring"):
+        return "earring"
     if n.startswith("ear"):
         return "ear"
+    if n.startswith(("headwear", "eyewear", "nose")):
+        return "face_part"
+    if n.startswith("wing"):
+        return "wing"
     if n.startswith("tail"):
         return "tail"
     if n.startswith(("lower body", "bottom", "skirt")):
@@ -75,11 +83,12 @@ def role_of(name: str, path: list[str]) -> str:
     return "body"
 
 
-HEAD_ROLES = {"face_part", "eye_white", "iris", "eye_line", "brow", "mouth", "hair_front", "hair_side", "hair_back", "ear"}
+HEAD_ROLES = {"face_part", "eye_white", "iris", "eye_line", "brow", "mouth", "hair_front", "hair_side", "hair_back", "ear",
+              "earring"}
 # how far in front of the face each piece sits (parallax when the head turns)
 DEPTH = {
     "hair_front": 1.0, "brow": 0.85, "eye_line": 0.8, "iris": 0.8, "eye_white": 0.75, "mouth": 0.75,
-    "face_part": 0.45, "ear": 0.3, "hair_side": 0.15, "hair_back": -0.8,
+    "face_part": 0.45, "ear": 0.3, "earring": 0.3, "hair_side": 0.15, "hair_back": -0.8,
 }
 
 
@@ -109,6 +118,7 @@ class Mesh:
     clip_to: "Mesh | None" = None
     chain: "Chain | None" = None
     extra: dict = field(default_factory=dict)
+    owner: int = 0  # which character (rig) of the stage drives this mesh
 
     @property
     def size(self):
@@ -366,6 +376,15 @@ def build_rig(layers, width: int, height: int, creature: bool = False) -> Rig:
             ch = Chain(anchor, (d / (np.linalg.norm(d) + 1e-6)).astype(np.float32), max(float(np.linalg.norm(d)) * 2, 10),
                        stiffness=30, damping=4, inertia=0.8, wind=0.15, max_angle=0.25)
             m.extra["twitch"] = True
+        elif m.role == "earring":
+            anchor = np.array([c[0], b[1]], np.float32)
+            ch = Chain(anchor, np.array([0, 1.0], np.float32), max(bh, 6), stiffness=12, damping=1.8, inertia=1.4,
+                       wind=0.3, max_angle=0.5)
+        elif m.role == "wing":
+            anchor = _nearest_point(m, body_center)
+            d = c - anchor
+            ch = Chain(anchor, (d / (np.linalg.norm(d) + 1e-6)).astype(np.float32), max(float(np.linalg.norm(d)) * 2, 10),
+                       stiffness=9, damping=2.0, inertia=0.6, wind=0.3, max_angle=0.25, wag=0.08)
         elif m.role == "plant":
             anchor = np.array(m.extra.get("anchor", (c[0], b[3])), np.float32)
             d = c - anchor
@@ -588,3 +607,40 @@ def _rotate(pts, c, ang):
     x = rel[:, 0] * ca - rel[:, 1] * sa
     y = rel[:, 0] * sa + rel[:, 1] * ca
     return np.stack([x, y], 1) + c
+
+
+# --------------------------------------------------------------------------- several characters
+
+
+@dataclass
+class Stage:
+    """All the characters of a picture (one rig each) plus the scenery."""
+
+    width: int
+    height: int
+    rigs: list
+
+    @property
+    def meshes(self):
+        return sorted((m for r in self.rigs for m in r.meshes), key=lambda m: m.z)
+
+
+def build_stage(layers, width: int, height: int, creature: bool = False) -> Stage:
+    groups: dict = {}
+    loose = []
+    for L in layers:
+        p = list(L.path)
+        if p and p[0].startswith("Character "):
+            groups.setdefault(p[0], []).append(L)
+        else:
+            loose.append(L)
+    if not groups:
+        return Stage(width, height, [build_rig(layers, width, height, creature=creature)])
+    rigs = []
+    for i, key in enumerate(sorted(groups, key=lambda k: int(k.split()[-1]))):
+        # the scenery rides on the first character's animator (wind, clouds)
+        rig = build_rig(groups[key] + (loose if i == 0 else []), width, height, creature=creature)
+        for m in rig.meshes:
+            m.owner = i
+        rigs.append(rig)
+    return Stage(width, height, rigs)

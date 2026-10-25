@@ -236,13 +236,25 @@ class _Reg:
 
     def id(self, name, path, z, **opts):
         for i, p in enumerate(self.parts, start=1):
-            if p["name"] == name:
+            if p["name"] == name and p["path"] == path:
                 return i
         self.parts.append(dict(name=name, path=path, z=z, **opts))
         return len(self.parts)
 
 
 def parse(sc: Scene, log=print) -> list[SemPart]:
+    from . import partseg
+
+    if partseg.available():
+        from .semantic_seg import parse_learned
+
+        parts = parse_learned(sc, log)
+        if parts:
+            return parts
+    return parse_rules(sc, log)
+
+
+def parse_rules(sc: Scene, log=print) -> list[SemPart]:
     from .atoms import background_atoms, make_atoms, vote
 
     H, W = sc.fg.shape
@@ -851,10 +863,10 @@ def sc_line(atoms):
     return atoms.line
 
 
-def _eye_parts(reg, O, m, side, lab):
+def _eye_parts(reg, O, m, side, lab, prefix=(), dz=0.0):
     L = lab[..., 0]
     chroma = np.hypot(lab[..., 1], lab[..., 2])
-    path = ["Head", f"Eye {side}"]
+    path = list(prefix) + ["Head", f"Eye {side}"]
     m = ndi.binary_fill_holes(m)
     white = m & (L > 75) & (chroma < 20)
     darkp = m & (L < 32)
@@ -876,9 +888,9 @@ def _eye_parts(reg, O, m, side, lab):
     # complete what is hidden: the eye white is an ellipse, the iris a disc
     white_full = m | _fit_ellipse(m)
     iris_full = iris | (_fit_circle(iris, white) & ndi.binary_dilation(white_full, iterations=2)) if iris.any() else iris
-    O[m] = reg.id(f"Eye White {side}", path, Z["Eye White"], sweep=False, fill="color", hint=white_full)
-    O[iris] = reg.id(f"Iris {side}", path, Z["Iris"], sweep=False, hint=iris_full)
-    O[lines | lash] = reg.id(f"Eye Line {side}", path, Z["Eye Line"], sweep=False)
+    O[m] = reg.id(f"Eye White {side}", path, Z["Eye White"] + dz, sweep=False, fill="color", hint=white_full)
+    O[iris] = reg.id(f"Iris {side}", path, Z["Iris"] + dz, sweep=False, hint=iris_full)
+    O[lines | lash] = reg.id(f"Eye Line {side}", path, Z["Eye Line"] + dz, sweep=False)
 
 
 def _fit_ellipse(m):
@@ -1034,7 +1046,7 @@ def _depth(sc, parts):
     class _S:
         pass
 
-    body = [q for q in parts if q.name in ("Top", "Bottom", "Body Skin")]
+    body = [q for q in parts if q.name in ("Top", "Bottom", "Body Skin", "Upper Body", "Lower Body")]
     if not body:
         return
     lbl = np.zeros(sc.fg.shape, np.int32)
