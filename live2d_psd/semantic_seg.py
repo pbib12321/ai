@@ -108,6 +108,7 @@ def parse_learned(sc: Scene, log=print) -> list[SemPart] | None:
         _, idx = ndi.distance_transform_edt(A == 0, return_indices=True)
         A[todo] = A[idx[0][todo], idx[1][todo]]
     _ink_to_front(A, atoms, reg, fg)
+    _drop_islands(A, reg)
 
     parts = []
     for i, d in enumerate(reg.parts, start=1):
@@ -119,6 +120,41 @@ def parse_learned(sc: Scene, log=print) -> list[SemPart] | None:
                              hidden_hint=hint))
     _depth(sc, parts)
     return parts
+
+
+def _drop_islands(A, reg):
+    """Small detached specks of a part (confetti around hair, a stray patch on
+    the background) join the part that surrounds them; on a rig they would
+    float on their own."""
+    small_ok = ("Eye", "Iris", "Brow", "Mouth", "Nose", "Ear", "Prop", "Hand")
+    for i, d in enumerate(reg.parts, start=1):
+        if d["name"].startswith(small_ok):
+            continue
+        m = A == i
+        lb, n = ndi.label(m)
+        if n < 2:
+            continue
+        sizes = np.bincount(lb.ravel(), minlength=n + 1)
+        sizes[0] = 0
+        lim = max(40, 0.03 * sizes.max())
+        bad = (sizes < lim) & (np.arange(n + 1) > 0)
+        if not bad[1:].any():
+            continue
+        specks = bad[lb]
+        A[specks] = 0
+        ring = ndi.binary_dilation(specks, iterations=2) & ~specks & (A > 0)
+        if ring.any():
+            _, idx = ndi.distance_transform_edt(~ring, return_indices=True)
+            near = A[idx[0], idx[1]]
+            # a speck that touches another part joins it; one floating alone
+            # in the background is background
+            lb2, n2 = ndi.label(specks)
+            grown = ndi.grey_dilation(lb2, size=5)
+            hit = np.zeros(n2 + 1, bool)
+            hit[np.unique(grown[(A > 0) & ~specks])] = True
+            hit[0] = False
+            join = hit[lb2]
+            A[join] = near[join]
 
 
 def _crowded(logits, H, W) -> bool:

@@ -408,6 +408,9 @@ def build_rig(layers, width: int, height: int, creature: bool = False) -> Rig:
             m.extra["held_by"] = side
     rig = Rig(width, height, meshes, head_center, neck, hip, face_size, shoulders, eyes, mouth)
     rig.body_center = body_center
+    # no face found (a masked hero, a character seen from behind): turning a
+    # guessed "head" tears it from the body, so the whole character moves as one
+    rig.has_head = bool(face) or creature or len(eyes) == 2
     return rig
 
 
@@ -571,7 +574,7 @@ class Animator:
             pts = _rotate(pts, r.shoulders[m.side], math.radians(p["Arm" + m.side]))
         elif m.role == "prop" and m.extra.get("held_by") in r.shoulders:
             pts = _rotate(pts, r.shoulders[m.extra["held_by"]], math.radians(p["Arm" + m.extra["held_by"]]))
-        if m.role in HEAD_ROLES:
+        if m.role in HEAD_ROLES and getattr(r, "has_head", True):
             pts = self._head(pts, m)
         if m.role not in ("leg", "plant", "grass"):
             pts = self._body(pts, m)
@@ -580,7 +583,7 @@ class Animator:
     def anchor_now(self, m: Mesh):
         """Current position of what a dangly mesh hangs from (for inertia)."""
         a = m.chain.anchor[None].astype(np.float64)
-        if m.role in HEAD_ROLES:
+        if m.role in HEAD_ROLES and getattr(self.rig, "has_head", True):
             a = self._head(a, m)
         if m.role not in ("leg", "plant", "grass"):
             a = self._body(a, m)

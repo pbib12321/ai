@@ -171,6 +171,30 @@ def _rescale(r, s):
     return RenderedLayer(r.name, r.path, r.z, img, int(round(r.left * s)), int(round(r.top * s)))
 
 
+def _eye_hint(meta, mask, metas, labels):
+    """What an eye white / iris covers underneath (the project stores only the
+    visible pixels): the white is an ellipse around the whole eye, the iris a
+    disc fitted to its rim, so an iris can always slide over white."""
+    from scipy import ndimage as ndi
+
+    from .semantic import _fit_circle, _fit_ellipse
+
+    name = meta["name"]
+    if not name.startswith(("Eye White", "Iris")):
+        return None
+    eye = np.zeros_like(mask)
+    white = mask
+    for o in metas:
+        if o["path"] == meta["path"]:
+            eye |= labels == o["id"]
+            if o["name"].startswith("Eye White"):
+                white = labels == o["id"]
+    eye = ndi.binary_fill_holes(eye)
+    if name.startswith("Eye White"):
+        return eye | _fit_ellipse(eye)
+    return (mask | _fit_circle(mask, white)) & ndi.binary_dilation(eye | _fit_ellipse(eye), iterations=2)
+
+
 def build_project(folder: str, out: str, log=print):
     """Rebuild the PSD from a (possibly hand-edited) project folder."""
     from PIL import Image
@@ -197,7 +221,7 @@ def build_project(folder: str, out: str, log=print):
             mask = labels == m["id"]
             if mask.any():
                 parts.append(SemPart(m["name"], m["path"], m["z"], mask, sweep=m.get("sweep", True), fill=m.get("fill", "inpaint"),
-                                     hidden_hint=mask if m["name"].startswith("Eye White") else None))
+                                     hidden_hint=_eye_hint(m, mask, metas, labels)))
         keep_bg = st.get("background", "auto") != "drop" and sc.had_background
         rendered = build_texture_layers(sc, parts, sweep=sweep, background=keep_bg, log=log, carry=_is_flat_cartoon(sc))
         if scale != 1.0:
