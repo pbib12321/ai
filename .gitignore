@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+*.psd
+*.parts.json
+*.preview.png
